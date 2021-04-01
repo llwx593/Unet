@@ -1,2 +1,4 @@
 /.vscode/
 /models/__pycache__/
+/inputs/dsb2018_96/
+/__pycache__/

@@ -4,7 +4,9 @@ import random
 import shutil
 import time
 import warnings
-import glob
+from glob import glob
+from tqdm import tqdm
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -30,9 +32,9 @@ model_names = sorted(name for name in models.__dict__
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR',
+parser.add_argument('--data', metavar='DIR',
                     help='path to dataset')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='unet',
+parser.add_argument('-a', '--arch', metavar='ARCH', default='UNet',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
@@ -43,7 +45,7 @@ parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
+parser.add_argument('-b', '--batch-size', default=16, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -168,7 +170,9 @@ def main_worker(gpu, ngpus_per_node, args):
                                 world_size=args.world_size, rank=args.rank)
 
     loc = "cpu"
-    if args.device == "GPU":
+    if args.device == "GPU" and args.gpu == None:
+        loc = "cuda:0"
+    elif args.device == "GPU":
         loc = "cuda:" + str(args.gpu)
     elif args.device == "NPU":
         loc = "npu:0"
@@ -183,7 +187,7 @@ def main_worker(gpu, ngpus_per_node, args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().to(loc)
+    criterion = nn.BCEWithLogitsLoss().to(loc)
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
@@ -268,17 +272,17 @@ def main_worker(gpu, ngpus_per_node, args):
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=args['batch_size'],
+        batch_size=args.batch_size,
         shuffle=(train_sampler is not None),
-        num_workers=args['num_workers'],
+        num_workers=args.num_workers,
         drop_last=True,
         sampler=train_sampler)
 
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
-        batch_size=args['batch_size'],
+        batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args['num_workers'],
+        num_workers=args.num_workers,
         drop_last=False)
 
     if args.evaluate:
@@ -340,12 +344,14 @@ def train(train_loader, model, criterion, optimizer, epoch, loc, args):
     model.train()
 
     end = time.time()
-    for i, (images, target) in enumerate(train_loader):
+    step = 0
+    pbar = tqdm(total=len(train_loader))
+    for images, target, _ in train_loader:
         # measure data loading time
         data_time.update(time.time() - end)
 
         images = images.to(loc)
-        target = images.to(loc)
+        target = target.to(loc)
 
         # compute output
         output = model(images)
@@ -365,9 +371,14 @@ def train(train_loader, model, criterion, optimizer, epoch, loc, args):
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-
-        if i % args.print_freq == 0:
-            progress.display(i)
+        
+        postfix = OrderedDict([
+            ('loss', losses.avg),
+            ('iou', iou.avg),
+        ])
+        pbar.set_postfix(postfix)
+        pbar.update(1)
+    pbar.close()
 
 
 def validate(val_loader, model, criterion, loc, args):
