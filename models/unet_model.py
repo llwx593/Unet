@@ -4,9 +4,10 @@ import torch.nn.functional as F
 
 from .unet_parts import *
 
+__all__ = ["UNet"]
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, n_classes, bilinear=True):
+    def __init__(self, n_channels=3, n_classes=1, bilinear=True):
         super(UNet, self).__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
