@@ -12,6 +12,7 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
+from torch.optim import lr_scheduler
 import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
@@ -74,13 +75,41 @@ parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
-parser.add_argument('--device', default='gpu', type=str,
-                    help='the device of training. ')
 parser.add_argument('--multiprocessing-distributed', action='store_true',
                     help='Use multi-processing distributed training to launch '
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+
+parser.add_argument('--device', default='gpu', type=str,
+                    help='the device of training. ')
+parser.add_argument('--input_channels', default=3, type=int,
+                    help='input channels')
+parser.add_argument('--num_classes', default=1, type=int,
+                    help='number of classes')
+parser.add_argument('--input_w', default=96, type=int,
+                    help='image width')
+parser.add_argument('--input_h', default=96, type=int,
+                    help='image height')
+# dataset
+parser.add_argument('--dataset', default='dsb2018_96',
+                    help='dataset name')
+parser.add_argument('--img_ext', default='.png',
+                    help='image file extension')
+parser.add_argument('--mask_ext', default='.png',
+                    help='mask file extension')
+parser.add_argument('--num_workers', default=4, type=int)
+# scheduler
+parser.add_argument('--scheduler', default='CosineAnnealingLR',
+                    choices=['CosineAnnealingLR', 'ReduceLROnPlateau', 'MultiStepLR', 'ConstantLR'])
+parser.add_argument('--min_lr', default=1e-5, type=float,
+                    help='minimum learning rate')
+parser.add_argument('--factor', default=0.1, type=float)
+parser.add_argument('--patience', default=2, type=int)
+parser.add_argument('--milestones', default='1,2', type=str)
+parser.add_argument('--gamma', default=2/3, type=float)
+parser.add_argument('--early_stopping', default=-1, type=int,
+                    metavar='N', help='early stopping (default: -1)')
 
 best_iou = 0
 
@@ -123,8 +152,8 @@ def main():
 def main_worker(gpu, ngpus_per_node, args):
     global best_iou
 
-    if args.device == "GPU" and args.gpu == None:
-        args.gpu = 0
+    args.gpu = gpu
+
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
@@ -148,11 +177,29 @@ def main_worker(gpu, ngpus_per_node, args):
     model = models.__dict__[args.arch]()
     model = model.to(loc)
 
+    if args.distributed:
+        args.batch_size = int(args.batch_size / ngpus_per_node)
+        args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().to(loc)
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
+
+    if args.scheduler == 'CosineAnnealingLR':
+        scheduler = lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=args.min_lr)
+    elif args.scheduler == 'ReduceLROnPlateau':
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, factor=args.factor, patience=args.patience,
+                                                   verbose=1, min_lr=args.min_lr)
+    elif args.scheduler == 'MultiStepLR':
+        scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(e) for e in args.milestones.split(',')], gamma=args.gamma)
+    elif args.scheduler == 'ConstantLR':
+        scheduler = None
+    else:
+        raise NotImplementedError
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -175,7 +222,7 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    img_ids = glob(os.path.join('inputs', args['dataset'], 'images', '*' + args['img_ext']))
+    img_ids = glob(os.path.join('inputs', args.dataset, 'images', '*' + args.img_ext))
     img_ids = [os.path.splitext(os.path.basename(p))[0] for p in img_ids]
 
     train_img_ids, val_img_ids = train_test_split(img_ids, test_size=0.2, random_state=41)
@@ -188,30 +235,30 @@ def main_worker(gpu, ngpus_per_node, args):
             transforms.RandomBrightness(),
             transforms.RandomContrast(),
         ], p=1),
-        transforms.Resize(args['input_h'], args['input_w']),
+        transforms.Resize(args.input_h, args.input_w),
         transforms.Normalize(),
     ])
 
     val_transform = Compose([
-        transforms.Resize(args['input_h'], args['input_w']),
+        transforms.Resize(args.input_h, args.input_w),
         transforms.Normalize(),
     ])
 
     train_dataset = Dataset(
         img_ids=train_img_ids,
-        img_dir=os.path.join('inputs', args['dataset'], 'images'),
-        mask_dir=os.path.join('inputs', args['dataset'], 'masks'),
-        img_ext=args['img_ext'],
-        mask_ext=args['mask_ext'],
-        num_classes=args['num_classes'],
+        img_dir=os.path.join('inputs', args.dataset, 'images'),
+        mask_dir=os.path.join('inputs', args.dataset, 'masks'),
+        img_ext=args.img_ext,
+        mask_ext=args.mask_ext,
+        num_classes=args.num_classes,
         transform=train_transform)
     val_dataset = Dataset(
         img_ids=val_img_ids,
-        img_dir=os.path.join('inputs', args['dataset'], 'images'),
-        mask_dir=os.path.join('inputs', args['dataset'], 'masks'),
-        img_ext=args['img_ext'],
-        mask_ext=args['mask_ext'],
-        num_classes=args['num_classes'],
+        img_dir=os.path.join('inputs', args.dataset, 'images'),
+        mask_dir=os.path.join('inputs', args.dataset, 'masks'),
+        img_ext=args.img_ext,
+        mask_ext=args.mask_ext,
+        num_classes=args.num_classes,
         transform=val_transform)
 
     if args.distributed:
@@ -235,23 +282,33 @@ def main_worker(gpu, ngpus_per_node, args):
         drop_last=False)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, args)
+        validate(val_loader, model, criterion, loc, args)
         return
 
+    trigger = 0
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        adjust_learning_rate(optimizer, epoch, args)
+        
 
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, loc, args)
 
         # evaluate on validation set
-        iou1 = validate(val_loader, model, criterion, loc, args)
+        iou1, losses = validate(val_loader, model, criterion, loc, args)
 
-        # remember best acc@1 and save checkpoint
+        if args.scheduler == 'CosineAnnealingLR':
+            scheduler.step()
+        elif args.scheduler == 'ReduceLROnPlateau':
+            scheduler.step(losses)
+
+        # remember best iou and save checkpoint
+        trigger += 1
         is_best = iou1 > best_iou
         best_iou = max(iou1, best_iou)
+        if is_best:
+            trigger = 0
+
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
@@ -262,6 +319,10 @@ def main_worker(gpu, ngpus_per_node, args):
                 'best_iou': best_iou,
                 'optimizer' : optimizer.state_dict(),
             }, is_best)
+
+        if args.early_stopping >= 0 and trigger >= args.early_stopping:
+            print("=> early stopping")
+            break
 
 
 def train(train_loader, model, criterion, optimizer, epoch, loc, args):
@@ -347,7 +408,7 @@ def validate(val_loader, model, criterion, loc, args):
         print(' * IOU {iou.avg:.4e} LOSSES {losses.avg:.4e}'
               .format(iou=iou, losses=losses))
 
-    return iou.avg
+    return iou.avg, losses.avg
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
@@ -395,30 +456,6 @@ class ProgressMeter(object):
         num_digits = len(str(num_batches // 1))
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
-
-
-def adjust_learning_rate(optimizer, epoch, args):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = args.lr * (0.1 ** (epoch // 30))
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-
-def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
-
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-        res = []
-        for k in topk:
-            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
 
 
 if __name__ == '__main__':
