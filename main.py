@@ -193,7 +193,6 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.distributed:
         args.batch_size = int(args.batch_size / ngpus_per_node)
         args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
 
     # define loss function (criterion) and optimizer
     criterion = nn.BCEWithLogitsLoss().to(loc)
@@ -307,7 +306,6 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         
-
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, loc, args)
 
@@ -325,7 +323,6 @@ def main_worker(gpu, ngpus_per_node, args):
         best_iou = max(iou1, best_iou)
         if is_best:
             trigger = 0
-
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
