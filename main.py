@@ -115,6 +115,13 @@ parser.add_argument('--gamma', default=2/3, type=float)
 parser.add_argument('--early_stopping', default=-1, type=int,
                     metavar='N', help='early stopping (default: -1)')
 
+parser.add_argument('--amp', default=False, action='store_true', 
+                    help='use amp to train the model')
+parser.add_argument('--loss-scale', default=1024., type=float,
+                    help='loss scale using in amp, default -1 means dynamic')
+parser.add_argument('--opt-level', default='O2', type=str,
+                    help='loss scale using in amp, default -1 means dynamic')
+
 best_iou = 0
 
 
@@ -193,8 +200,8 @@ def main_worker(gpu, ngpus_per_node, args):
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
-
-    model, optimizer = amp.initialize(model, optimizer)
+    if args.amp:
+        model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
     if args.scheduler == 'CosineAnnealingLR':
         scheduler = lr_scheduler.CosineAnnealingLR(
@@ -223,6 +230,8 @@ def main_worker(gpu, ngpus_per_node, args):
                 best_iou = checkpoint['best_iou']
                 model.load_state_dict(checkpoint['state_dict'])
                 optimizer.load_state_dict(checkpoint['optimizer'])
+                if args.amp:
+                    amp.load_state_dict['amp']
                 print("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
@@ -320,13 +329,23 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_iou': best_iou,
-                'optimizer' : optimizer.state_dict(),
-            }, is_best)
+            if args.amp:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'best_iou': best_iou,
+                    'optimizer' : optimizer.state_dict(),
+                    'amp' : amp.state_dict(),
+                }, is_best)
+            else:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'best_iou': best_iou,
+                    'optimizer' : optimizer.state_dict(),
+                }, is_best)
 
         if args.early_stopping >= 0 and trigger >= args.early_stopping:
             print("=> early stopping")
@@ -368,9 +387,11 @@ def train(train_loader, model, criterion, optimizer, epoch, loc, args):
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        with amp.scale_loss(loss, optimizer) as scaled_loss:
-            scaled_loss.backward()
-        #loss.backward()
+        if args.amp:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            loss.backward()
         optimizer.step()
 
         # measure elapsed time
