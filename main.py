@@ -5,6 +5,7 @@ import shutil
 import time
 import warnings
 from glob import glob
+from albumentations.augmentations.functional import optical_distortion
 from tqdm import tqdm
 from collections import OrderedDict
 
@@ -26,6 +27,7 @@ from albumentations.augmentations import transforms
 from albumentations.core.composition import Compose, OneOf
 from sklearn.model_selection import train_test_split
 from utils import *
+from apex import amp
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -192,6 +194,8 @@ def main_worker(gpu, ngpus_per_node, args):
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
+    model, optimizer = amp.initialize(model, optimizer)
+
     if args.scheduler == 'CosineAnnealingLR':
         scheduler = lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=args.epochs, eta_min=args.min_lr)
@@ -344,7 +348,6 @@ def train(train_loader, model, criterion, optimizer, epoch, loc, args):
     model.train()
 
     end = time.time()
-    step = 0
     pbar = tqdm(total=len(train_loader))
     for images, target, _ in train_loader:
         # measure data loading time
@@ -365,7 +368,9 @@ def train(train_loader, model, criterion, optimizer, epoch, loc, args):
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        loss.backward()
+        with amp.scale_loss(loss, optimizer) as scaled_loss:
+            scaled_loss.backward()
+        #loss.backward()
         optimizer.step()
 
         # measure elapsed time
